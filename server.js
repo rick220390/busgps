@@ -58,8 +58,11 @@ app.get('/api/hazards', async (req, res) => {
     // Calculate bounding box for efficient query (rough approximation)
     // 1 degree latitude ≈ 111 km
     // 1 degree longitude ≈ 111 km * cos(latitude)
-    const latDelta = radius / 111;
-    const lngDelta = radius / (111 * Math.cos(lat * Math.PI / 180));
+    const latNum = parseFloat(lat);
+    const lngNum = parseFloat(lng);
+    const radiusNum = parseFloat(radius);
+    const latDelta = radiusNum / 111;
+    const lngDelta = radiusNum / (111 * Math.cos(latNum * Math.PI / 180));
 
     const query = `
       SELECT 
@@ -73,16 +76,16 @@ app.get('/api/hazards', async (req, res) => {
       FROM hazards 
       WHERE 
         timestamp > NOW() - INTERVAL '24 hours'
-        AND latitude BETWEEN $1 - $3 AND $1 + $3
-        AND longitude BETWEEN $2 - $4 AND $2 + $4
+        AND latitude BETWEEN $1 AND $2
+        AND longitude BETWEEN $3 AND $4
       ORDER BY timestamp DESC
     `;
 
     const result = await pool.query(query, [
-      parseFloat(lat), 
-      parseFloat(lng), 
-      latDelta, 
-      lngDelta
+      latNum - latDelta,
+      latNum + latDelta,
+      lngNum - lngDelta,
+      lngNum + lngDelta
     ]);
 
     res.json({

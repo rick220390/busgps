@@ -113,7 +113,7 @@ app.post('/api/hazards', async (req, res) => {
     }
 
     // Validate hazard type
-    const validTypes = ['Road Closure', 'Police', 'Accident', 'Debris', 'Weather', 'Other'];
+    const validTypes = ['Road Closure', 'Police', 'Accident', 'Debris', 'Weather', 'Other', 'Traffic'];
     if (!validTypes.includes(type)) {
       return res.status(400).json({ 
         error: 'Invalid hazard type', 

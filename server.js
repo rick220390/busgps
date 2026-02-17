@@ -50,7 +50,6 @@ app.get('/health', async (req, res) => {
 app.get('/api/hazards', async (req, res) => {
   try {
     const { lat, lng, radius = 50 } = req.query; // radius in km, default 50km
-    
     if (!lat || !lng) {
       return res.status(400).json({ error: 'Latitude and longitude are required' });
     }
@@ -63,6 +62,9 @@ app.get('/api/hazards', async (req, res) => {
     const radiusNum = parseFloat(radius);
     const latDelta = radiusNum / 111;
     const lngDelta = radiusNum / (111 * Math.cos(latNum * Math.PI / 180));
+
+    // Log bounding box and query params
+    console.log(`[Hazard GET] lat: ${latNum}, lng: ${lngNum}, radius: ${radiusNum}km, lat range: [${latNum - latDelta}, ${latNum + latDelta}], lng range: [${lngNum - lngDelta}, ${lngNum + lngDelta}]`);
 
     const query = `
       SELECT 
@@ -87,6 +89,8 @@ app.get('/api/hazards', async (req, res) => {
       lngNum - lngDelta,
       lngNum + lngDelta
     ]);
+
+    console.log(`[Hazard GET] Found ${result.rows.length} hazards in DB.`);
 
     res.json({
       count: result.rows.length,
@@ -156,6 +160,9 @@ app.post('/api/hazards', async (req, res) => {
       parseFloat(longitude),
       reported_by
     ]);
+
+    // Log hazard insertion
+    console.log(`[Hazard POST] Inserted hazard:`, result.rows[0]);
 
     res.status(201).json({
       message: 'Hazard reported successfully',

@@ -241,6 +241,196 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
+// === SUBSCRIPTION ENDPOINTS ===
+
+// Get subscription status for a device
+app.get('/api/subscription/status', async (req, res) => {
+  try {
+    const { deviceId } = req.query;
+    
+    if (!deviceId) {
+      return res.status(400).json({ error: 'deviceId is required' });
+    }
+
+    // Check for active subscription first
+    const subscriptionQuery = await pool.query(
+      `SELECT * FROM subscriptions 
+       WHERE device_id = $1 AND is_active = true AND end_date > NOW()
+       ORDER BY end_date DESC LIMIT 1`,
+      [deviceId]
+    );
+
+    if (subscriptionQuery.rows.length > 0) {
+      const sub = subscriptionQuery.rows[0];
+      return res.json({
+        status: 'active',
+        hasAccess: true,
+        isTrialPeriod: false,
+        subscriptionType: sub.subscription_type,
+        endDate: sub.end_date,
+        daysRemaining: Math.ceil((new Date(sub.end_date) - new Date()) / (1000 * 60 * 60 * 24))
+      });
+    }
+
+    // Check for trial period
+    const trialQuery = await pool.query(
+      'SELECT * FROM device_trials WHERE device_id = $1',
+      [deviceId]
+    );
+
+    if (trialQuery.rows.length > 0) {
+      const trial = trialQuery.rows[0];
+      const now = new Date();
+      const trialEnd = new Date(trial.trial_end_date);
+      const daysRemaining = Math.ceil((trialEnd - now) / (1000 * 60 * 60 * 24));
+
+      if (now < trialEnd) {
+        // Trial still active
+        return res.json({
+          status: 'trial',
+          hasAccess: true,
+          isTrialPeriod: true,
+          trialStartDate: trial.trial_start_date,
+          trialEndDate: trial.trial_end_date,
+          daysRemaining: Math.max(0, daysRemaining)
+        });
+      } else {
+        // Trial expired
+        return res.json({
+          status: 'expired',
+          hasAccess: false,
+          isTrialPeriod: false,
+          daysRemaining: 0
+        });
+      }
+    }
+
+    // No trial or subscription found - eligible for new trial
+    return res.json({
+      status: 'new',
+      hasAccess: false,
+      isTrialPeriod: false,
+      eligibleForTrial: true
+    });
+
+  } catch (error) {
+    console.error('Error checking subscription status:', error);
+    res.status(500).json({ error: 'Failed to check subscription status', message: error.message });
+  }
+});
+
+// Start a new trial for a device
+app.post('/api/subscription/start-trial', async (req, res) => {
+  try {
+    const { deviceId } = req.body;
+    
+    if (!deviceId) {
+      return res.status(400).json({ error: 'deviceId is required' });
+    }
+
+    // Check if device already has a trial
+    const existingTrial = await pool.query(
+      'SELECT * FROM device_trials WHERE device_id = $1',
+      [deviceId]
+    );
+
+    if (existingTrial.rows.length > 0) {
+      return res.status(409).json({ 
+        error: 'Trial already used', 
+        message: 'This device has already used the free trial' 
+      });
+    }
+
+    // Create new 7-day trial
+    const trialStartDate = new Date();
+    const trialEndDate = new Date();
+    trialEndDate.setDate(trialEndDate.getDate() + 7);
+
+    const result = await pool.query(
+      `INSERT INTO device_trials (device_id, trial_start_date, trial_end_date)
+       VALUES ($1, $2, $3)
+       RETURNING *`,
+      [deviceId, trialStartDate, trialEndDate]
+    );
+
+    console.log(`[Trial] Started new 7-day trial for device: ${deviceId}`);
+
+    res.status(201).json({
+      message: 'Trial started successfully',
+      status: 'trial',
+      hasAccess: true,
+      isTrialPeriod: true,
+      trialStartDate: result.rows[0].trial_start_date,
+      trialEndDate: result.rows[0].trial_end_date,
+      daysRemaining: 7
+    });
+
+  } catch (error) {
+    console.error('Error starting trial:', error);
+    res.status(500).json({ error: 'Failed to start trial', message: error.message });
+  }
+});
+
+// Verify Google Play purchase and activate subscription
+app.post('/api/subscription/verify-purchase', async (req, res) => {
+  try {
+    const { deviceId, subscriptionType, googlePlayReceipt } = req.body;
+    
+    if (!deviceId || !subscriptionType || !googlePlayReceipt) {
+      return res.status(400).json({ 
+        error: 'Missing required fields',
+        required: ['deviceId', 'subscriptionType', 'googlePlayReceipt']
+      });
+    }
+
+    // TODO: Add actual Google Play receipt verification here
+    // For now, we'll trust the client (NOT production-ready!)
+    // In production, use Google Play Developer API to verify the receipt server-side
+
+    const startDate = new Date();
+    const endDate = new Date();
+    
+    // Set expiration based on subscription type
+    if (subscriptionType === 'monthly') {
+      endDate.setMonth(endDate.getMonth() + 1);
+    } else if (subscriptionType === 'annual') {
+      endDate.setFullYear(endDate.getFullYear() + 1);
+    } else {
+      return res.status(400).json({ error: 'Invalid subscription type' });
+    }
+
+    // Upsert subscription (update if exists, insert if not)
+    const result = await pool.query(
+      `INSERT INTO subscriptions (device_id, subscription_type, start_date, end_date, google_play_receipt, is_active)
+       VALUES ($1, $2, $3, $4, $5, true)
+       ON CONFLICT (device_id) 
+       DO UPDATE SET 
+         subscription_type = $2,
+         start_date = $3,
+         end_date = $4,
+         google_play_receipt = $5,
+         is_active = true,
+         updated_at = NOW()
+       RETURNING *`,
+      [deviceId, subscriptionType, startDate, endDate, googlePlayReceipt]
+    );
+
+    console.log(`[Subscription] Activated ${subscriptionType} subscription for device: ${deviceId}`);
+
+    res.json({
+      message: 'Subscription activated successfully',
+      status: 'active',
+      hasAccess: true,
+      subscriptionType: result.rows[0].subscription_type,
+      endDate: result.rows[0].end_date
+    });
+
+  } catch (error) {
+    console.error('Error verifying purchase:', error);
+    res.status(500).json({ error: 'Failed to verify purchase', message: error.message });
+  }
+});
+
 // Initialize database table on startup
 async function initializeDatabase() {
   try {
@@ -266,6 +456,44 @@ async function initializeDatabase() {
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_hazards_timestamp 
       ON hazards (timestamp);
+    `);
+
+    // === SUBSCRIPTION TABLES ===
+    // Table to track device trials (prevents unlimited trials by clearing cache)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS device_trials (
+        id SERIAL PRIMARY KEY,
+        device_id VARCHAR(255) UNIQUE NOT NULL,
+        trial_start_date TIMESTAMP NOT NULL,
+        trial_end_date TIMESTAMP NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Table to track active subscriptions
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS subscriptions (
+        id SERIAL PRIMARY KEY,
+        device_id VARCHAR(255) UNIQUE NOT NULL,
+        subscription_type VARCHAR(20) NOT NULL, -- 'monthly' or 'annual'
+        start_date TIMESTAMP NOT NULL,
+        end_date TIMESTAMP NOT NULL,
+        google_play_receipt TEXT,
+        is_active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Index for quick device lookups
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_device_trials_device_id 
+      ON device_trials (device_id);
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_subscriptions_device_id 
+      ON subscriptions (device_id);
     `);
 
     console.log('✅ Database initialized successfully');

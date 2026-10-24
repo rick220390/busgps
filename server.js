@@ -174,6 +174,51 @@ app.post('/api/hazards', async (req, res) => {
   }
 });
 
+// Record a driver's confirmation that a hazard is still present or has cleared.
+app.post('/api/hazards/:id/confirm', async (req, res) => {
+  try {
+    const hazardId = Number.parseInt(req.params.id, 10);
+    const { still_exists, confirmed_by = 'anonymous' } = req.body || {};
+
+    if (!Number.isInteger(hazardId) || hazardId <= 0 || typeof still_exists !== 'boolean') {
+      return res.status(400).json({
+        error: 'Invalid confirmation',
+        required: ['numeric hazard id', 'still_exists boolean']
+      });
+    }
+
+    const hazard = await pool.query('SELECT id FROM hazards WHERE id = $1', [hazardId]);
+    if (hazard.rows.length === 0) {
+      return res.status(404).json({ error: 'Hazard not found' });
+    }
+
+    await pool.query(
+      `INSERT INTO hazard_confirmations (hazard_id, still_exists, confirmed_by, timestamp)
+       VALUES ($1, $2, $3, NOW())`,
+      [hazardId, still_exists, String(confirmed_by).slice(0, 100)]
+    );
+
+    const counts = await pool.query(
+      `SELECT
+         COUNT(*)::int AS total_confirmations,
+         COUNT(*) FILTER (WHERE still_exists = false)::int AS cleared_confirmations
+       FROM hazard_confirmations
+       WHERE hazard_id = $1`,
+      [hazardId]
+    );
+
+    // Do not automatically delete a shared hazard based on an unauthenticated single vote.
+    res.json({
+      message: 'Hazard confirmation recorded',
+      should_delete: false,
+      confirmations: counts.rows[0]
+    });
+  } catch (error) {
+    console.error('Error confirming hazard:', error);
+    res.status(500).json({ error: 'Failed to confirm hazard' });
+  }
+});
+
 // Delete a hazard (optional - for moderation or user corrections)
 app.delete('/api/hazards/:id', async (req, res) => {
   try {
@@ -456,6 +501,22 @@ async function initializeDatabase() {
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_hazards_timestamp 
       ON hazards (timestamp);
+    `);
+
+    // Track hazard confirmations from drivers.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS hazard_confirmations (
+        id SERIAL PRIMARY KEY,
+        hazard_id INTEGER NOT NULL REFERENCES hazards(id) ON DELETE CASCADE,
+        still_exists BOOLEAN NOT NULL,
+        confirmed_by VARCHAR(100) DEFAULT 'anonymous',
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_hazard_confirmations_hazard_id
+      ON hazard_confirmations (hazard_id);
     `);
 
     // === SUBSCRIPTION TABLES ===
